@@ -53,7 +53,7 @@ def process_events(df: pd.DataFrame) -> pd.DataFrame:
     df["date"] = df["start"].dt.date
     df["week"] = df["start"].dt.isocalendar().week.astype(int)
     df["year"] = df["start"].dt.year
-    df["month"] = df["start"].dt.to_period("M").astype(str)
+    df["month"] = df["start"].dt.strftime("%Y-%m")
     df["day_of_week"] = df["start"].dt.day_name()
 
     # Drop intermediate columns
