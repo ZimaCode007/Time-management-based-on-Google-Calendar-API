@@ -1,4 +1,5 @@
 import logging
+from datetime import datetime
 from pathlib import Path
 
 from google.oauth2.credentials import Credentials
@@ -17,13 +18,16 @@ MIME_TYPES = {
 
 
 def upload_reports(creds: Credentials, files: list[Path]) -> list[dict]:
-    """Upload report files to Google Drive.
+    """Upload report files to Google Drive, organized by Year-Month.
 
-    Creates or finds a target folder, uploads each file, and returns
-    a list of dicts with file name and web link.
+    Structure: Time Analytics Reports / 2026-02 / files...
     """
     service = build("drive", "v3", credentials=creds)
-    folder_id = _get_or_create_folder(service)
+    root_id = _get_or_create_folder(service, config.DRIVE_FOLDER_NAME)
+
+    # Create Year-Month subfolder (e.g. "2026-02")
+    month_label = datetime.now().strftime("%Y-%m")
+    month_folder_id = _get_or_create_folder(service, month_label, parent_id=root_id)
 
     uploaded = []
     for file_path in files:
@@ -34,7 +38,7 @@ def upload_reports(creds: Credentials, files: list[Path]) -> list[dict]:
         mime = MIME_TYPES.get(file_path.suffix, "application/octet-stream")
         file_metadata = {
             "name": file_path.name,
-            "parents": [folder_id],
+            "parents": [month_folder_id],
         }
         media = MediaFileUpload(str(file_path), mimetype=mime)
 
@@ -48,30 +52,41 @@ def upload_reports(creds: Credentials, files: list[Path]) -> list[dict]:
         uploaded.append({"name": file_path.name, "link": link})
         logger.info("Uploaded %s -> %s", file_path.name, link)
 
-    logger.info("Uploaded %d files to Drive folder '%s'", len(uploaded), config.DRIVE_FOLDER_NAME)
+    logger.info(
+        "Uploaded %d files to Drive: %s/%s",
+        len(uploaded), config.DRIVE_FOLDER_NAME, month_label,
+    )
     return uploaded
 
 
-def _get_or_create_folder(service) -> str:
-    """Find existing folder by name or create a new one. Returns folder ID."""
+def _get_or_create_folder(
+    service, folder_name: str, parent_id: str = None
+) -> str:
+    """Find existing folder by name (under parent) or create one. Returns folder ID."""
     query = (
-        f"name = '{config.DRIVE_FOLDER_NAME}' "
+        f"name = '{folder_name}' "
         "and mimeType = 'application/vnd.google-apps.folder' "
         "and trashed = false"
     )
+    if parent_id:
+        query += f" and '{parent_id}' in parents"
+
     results = service.files().list(q=query, spaces="drive", fields="files(id)").execute()
     folders = results.get("files", [])
 
     if folders:
         folder_id = folders[0]["id"]
-        logger.info("Found existing Drive folder: %s", folder_id)
+        logger.info("Found existing Drive folder '%s': %s", folder_name, folder_id)
         return folder_id
 
     folder_metadata = {
-        "name": config.DRIVE_FOLDER_NAME,
+        "name": folder_name,
         "mimeType": "application/vnd.google-apps.folder",
     }
+    if parent_id:
+        folder_metadata["parents"] = [parent_id]
+
     folder = service.files().create(body=folder_metadata, fields="id").execute()
     folder_id = folder["id"]
-    logger.info("Created Drive folder: %s", folder_id)
+    logger.info("Created Drive folder '%s': %s", folder_name, folder_id)
     return folder_id
