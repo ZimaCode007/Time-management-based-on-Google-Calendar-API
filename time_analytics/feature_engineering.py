@@ -21,8 +21,8 @@ def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
 
     df = df.copy()
 
-    # Extract category from [Tag] in summary
-    df["category"] = df["summary"].apply(_extract_category)
+    # Extract category: [Tag] in title overrides calendar name
+    df["category"] = df.apply(_extract_category, axis=1)
     logger.info(
         "Categories found: %s",
         df["category"].value_counts().to_dict(),
@@ -42,14 +42,23 @@ def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def _extract_category(summary: str) -> str:
-    """Extract category tag from event summary.
+def _extract_category(row: pd.Series) -> str:
+    """Determine event category.
 
-    Looks for [Tag] pattern at any position in the title.
-    Returns DEFAULT_CATEGORY if no tag found.
+    Priority:
+    1. [Tag] in event title (explicit override)
+    2. Calendar name (from Google Calendar)
+    3. DEFAULT_CATEGORY fallback
     """
-    match = config.CATEGORY_PATTERN.search(summary)
-    return match.group(1).strip() if match else config.DEFAULT_CATEGORY
+    match = config.CATEGORY_PATTERN.search(row["summary"])
+    if match:
+        return match.group(1).strip()
+
+    calendar_name = row.get("calendar_name", "")
+    if calendar_name:
+        return calendar_name
+
+    return config.DEFAULT_CATEGORY
 
 
 def _compute_streaks(df: pd.DataFrame) -> pd.Series:

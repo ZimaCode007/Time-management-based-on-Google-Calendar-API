@@ -1,7 +1,7 @@
 """Personal Time Analytics — Pipeline Orchestrator.
 
 Usage:
-    python -m time_analytics.main [--days N] [--skip-upload] [--incremental] [--force]
+    python -m time_analytics.main [--days N] [--start YYYY-MM-DD --end YYYY-MM-DD] [--skip-upload] [--incremental] [--force]
 """
 
 import argparse
@@ -35,6 +35,18 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=config.DEFAULT_LOOKBACK_DAYS,
         help=f"Number of days to look back (default: {config.DEFAULT_LOOKBACK_DAYS})",
+    )
+    parser.add_argument(
+        "--start",
+        type=str,
+        default=None,
+        help="Start date (YYYY-MM-DD). Use with --end for a specific range.",
+    )
+    parser.add_argument(
+        "--end",
+        type=str,
+        default=None,
+        help="End date (YYYY-MM-DD). Use with --start for a specific range.",
     )
     parser.add_argument(
         "--skip-upload",
@@ -78,15 +90,30 @@ def _check_idempotency(force: bool) -> bool:
     return True
 
 
-def run(days: int, skip_upload: bool, incremental: bool, force: bool) -> None:
+def run(
+    days: int,
+    skip_upload: bool,
+    incremental: bool,
+    force: bool,
+    start_date: str = None,
+    end_date: str = None,
+) -> None:
     """Execute the full analytics pipeline."""
     logger.info("=== Starting Time Analytics Pipeline ===")
-    logger.info(
-        "Lookback: %d days | Upload: %s | Incremental: %s",
-        days,
-        "skip" if skip_upload else "enabled",
-        incremental,
-    )
+    if start_date and end_date:
+        logger.info(
+            "Range: %s to %s | Upload: %s",
+            start_date,
+            end_date,
+            "skip" if skip_upload else "enabled",
+        )
+    else:
+        logger.info(
+            "Lookback: %d days | Upload: %s | Incremental: %s",
+            days,
+            "skip" if skip_upload else "enabled",
+            incremental,
+        )
 
     # Idempotency check
     if not _check_idempotency(force):
@@ -98,7 +125,10 @@ def run(days: int, skip_upload: bool, incremental: bool, force: bool) -> None:
 
     # Step 2: Fetch events
     logger.info("Step 2/6: Fetching calendar events")
-    raw_df = fetch_events(creds, days_back=days, incremental=incremental)
+    raw_df = fetch_events(
+        creds, days_back=days, incremental=incremental,
+        start_date=start_date, end_date=end_date,
+    )
     if raw_df.empty:
         logger.warning("No events found. Exiting.")
         return
@@ -159,6 +189,8 @@ def main() -> None:
             skip_upload=args.skip_upload,
             incremental=args.incremental,
             force=args.force,
+            start_date=args.start,
+            end_date=args.end,
         )
     except FileNotFoundError as e:
         logger.error(str(e))

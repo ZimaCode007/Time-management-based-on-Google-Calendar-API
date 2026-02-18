@@ -77,7 +77,7 @@ def _generate_excel(df: pd.DataFrame, result: AnalyticsResult, week_label: str) 
 
         # Raw data sheet
         export_cols = [
-            c for c in ["date", "summary", "category", "duration_hours", "day_of_week", "iso_week"]
+            c for c in ["date", "summary", "calendar_name", "category", "duration_hours", "day_of_week", "iso_week"]
             if c in df.columns
         ]
         if export_cols:
