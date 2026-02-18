@@ -7,9 +7,9 @@ Personal Time Analytics System — automated pipeline that fetches Google Calend
 ```
 time_analytics/
 ├── config.py                # Constants: SCOPES, TIMEZONE, paths, regex
-├── data_ingestion.py        # OAuth2 auth, Calendar API fetch, raw data saving, state I/O
+├── data_ingestion.py        # OAuth2 auth, multi-calendar fetch, raw data saving, state I/O
 ├── processing.py            # Clean events: remove all-day/zero-duration, tz convert, duration
-├── feature_engineering.py   # Extract [Tag] categories, streaks, daily ratios
+├── feature_engineering.py   # Category from calendar name/[Tag], streaks, daily ratios
 ├── analytics.py             # Metrics: totals, consistency, focus (HHI), trend analysis
 ├── reporting.py             # Excel (5 sheets) + 3 PNG charts → reports/
 ├── drive_uploader.py        # Upload to Google Drive folder
@@ -21,14 +21,15 @@ Pipeline order: **ingest → process → engineer → analyze → report → upl
 
 ## CLI Usage
 ```bash
-python -m time_analytics.main --days 30 --skip-upload    # local test
-python -m time_analytics.main --incremental              # only new events
-python -m time_analytics.main --force                    # regenerate existing reports
+python -m time_analytics.main --days 30 --skip-upload                     # rolling lookback, no upload
+python -m time_analytics.main --start 2026-02-15 --end 2026-02-21        # specific date range
+python -m time_analytics.main --incremental                               # only events updated since last run
+python -m time_analytics.main --force                                     # regenerate even if report exists
 ```
 
 ## Conventions
 - **Timezone:** Always use `Europe/Berlin` (configured in `config.py`)
-- **Categories:** Extracted from `[Tag]` prefix in event titles (regex in `config.py`)
+- **Categories:** Primary source is **calendar name** (fetches all user calendars). `[Tag]` prefix in event title overrides calendar name. Fallback: "Uncategorized".
 - **Report naming:** `weekly_report_YYYY_WNN.xlsx`, `monthly_report_YYYY_MM.png`
 - **Logging:** Every module uses `logging.getLogger(__name__)`. Log at INFO level for pipeline steps, WARNING for skipped data, ERROR for failures.
 - **No hardcoded credentials.** Credentials come from `credentials.json` / `token.json` (gitignored) or GitHub Secrets in CI.
@@ -42,6 +43,9 @@ python -m time_analytics.main --force                    # regenerate existing r
 - All new analytics metrics should be added to the `AnalyticsResult` dataclass and surfaced in the Excel Summary sheet
 
 ## Key Design Decisions
+- **Multi-calendar:** Fetches from all user calendars via `calendarList().list()`. Calendar name becomes the event category.
+- **Category priority:** `[Tag]` in title > calendar name > "Uncategorized"
+- **Date range:** Supports both `--days N` (rolling) and `--start/--end` (explicit range)
 - **Idempotency:** `main.py` checks if `weekly_report_{week}.xlsx` exists before running. Use `--force` to override.
 - **Incremental fetch:** Uses `updatedMin` parameter from saved state in `data/pipeline_state.json`
 - **Raw data traceability:** Every fetch saves raw API response to `data/raw_events_{timestamp}.json`
