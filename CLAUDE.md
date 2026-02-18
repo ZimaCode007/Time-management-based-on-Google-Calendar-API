@@ -11,8 +11,8 @@ time_analytics/
 ├── processing.py            # Clean events: remove all-day/zero-duration, tz convert, duration
 ├── feature_engineering.py   # Category from calendar name/[Tag], streaks, daily ratios
 ├── analytics.py             # Metrics: totals, consistency, focus (HHI), trend analysis
-├── reporting.py             # Excel (5 sheets) + 3 PNG charts → reports/
-├── drive_uploader.py        # Upload to Google Drive folder
+├── reporting.py             # Excel (7 sheets) + 3 PNG charts → reports/
+├── drive_uploader.py        # Upload to Google Drive (Year-Month subfolders)
 ├── main.py                  # CLI orchestrator with idempotency + incremental support
 └── __main__.py              # Entry: python -m time_analytics
 ```
@@ -41,6 +41,26 @@ python -m time_analytics.main --force                                     # rege
 - Use `pandas` for all data manipulation, `matplotlib` with `Agg` backend for charts
 - Prefer editing existing files over creating new ones
 - All new analytics metrics should be added to the `AnalyticsResult` dataclass and surfaced in the Excel Summary sheet
+
+## Excel Report Sheets
+1. **Summary** — Total hours, events, avg daily, consistency/focus scores, trend
+2. **Weekly** — Hours per ISO week
+3. **Monthly** — Hours per month
+4. **Categories** — Hours and ratio per category
+5. **Details** — Two sections:
+   - **Job Summary** (top): Category → Job → Sessions + Total Hours with subtotals
+   - **Event Log** (bottom): Flat table (Date, Category, Job, Hours) for filtering
+6. **Raw Data** — All events with date, summary, calendar, category, hours
+
+## Drive Upload Structure
+```
+Time Analytics Reports/
+└── YYYY-MM/              (auto-created per month)
+    ├── weekly_report_YYYY_WNN.xlsx
+    ├── monthly_report_YYYY_MM.png
+    ├── weekly_trend_YYYY_WNN.png
+    └── category_distribution_YYYY_WNN.png
+```
 
 ## Key Design Decisions
 - **Multi-calendar:** Fetches from all user calendars via `calendarList().list()`. Calendar name becomes the event category.
