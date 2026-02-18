@@ -75,6 +75,10 @@ def _generate_excel(df: pd.DataFrame, result: AnalyticsResult, week_label: str) 
         if not result.category_ratios.empty:
             result.category_ratios.to_excel(writer, sheet_name="Categories", index=False)
 
+        # Work Log sheet — every event grouped by category with subtotals
+        if "category" in df.columns and "duration_hours" in df.columns:
+            _write_work_log(df, writer)
+
         # Raw data sheet
         export_cols = [
             c for c in ["date", "summary", "calendar_name", "category", "duration_hours", "day_of_week", "iso_week"]
@@ -85,6 +89,54 @@ def _generate_excel(df: pd.DataFrame, result: AnalyticsResult, week_label: str) 
 
     logger.info("Excel report: %s", path)
     return path
+
+
+def _write_work_log(df: pd.DataFrame, writer: pd.ExcelWriter) -> None:
+    """Write a Work Log sheet grouped by category → job name with subtotals."""
+    rows = []
+    sorted_df = df.sort_values(["category", "summary", "date"])
+
+    for category, cat_group in sorted_df.groupby("category", sort=True):
+        # Category header
+        rows.append({"Date": "", "Job": f"=== {category} ===", "Hours": ""})
+
+        # Group by job name (event summary) within each category
+        for job_name, job_group in cat_group.groupby("summary", sort=True):
+            # Job header
+            rows.append({"Date": "", "Job": f"  {job_name}", "Hours": ""})
+
+            # Individual sessions
+            for _, event in job_group.iterrows():
+                rows.append({
+                    "Date": str(event["date"]),
+                    "Job": "",
+                    "Hours": round(event["duration_hours"], 2),
+                })
+
+            # Job subtotal
+            rows.append({
+                "Date": "",
+                "Job": f"  Subtotal: {job_name}",
+                "Hours": round(job_group["duration_hours"].sum(), 2),
+            })
+
+        # Category total
+        rows.append({
+            "Date": "",
+            "Job": f"TOTAL ({category})",
+            "Hours": round(cat_group["duration_hours"].sum(), 2),
+        })
+        # Blank separator
+        rows.append({"Date": "", "Job": "", "Hours": ""})
+
+    # Grand total
+    rows.append({
+        "Date": "",
+        "Job": "GRAND TOTAL",
+        "Hours": round(df["duration_hours"].sum(), 2),
+    })
+
+    pd.DataFrame(rows).to_excel(writer, sheet_name="Work Log", index=False)
 
 
 def _generate_charts(
