@@ -1,13 +1,13 @@
 """Personal Time Analytics — Pipeline Orchestrator.
 
 Usage:
-    python -m time_analytics.main [--days N] [--start YYYY-MM-DD --end YYYY-MM-DD] [--skip-upload] [--incremental] [--force]
+    python -m time_analytics.main [--days N] [--start YYYY-MM-DD --end YYYY-MM-DD] [--last-week] [--skip-upload] [--incremental] [--force]
 """
 
 import argparse
 import logging
 import sys
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from . import config
 from .analytics import compute_analytics
@@ -49,6 +49,11 @@ def parse_args() -> argparse.Namespace:
         help="End date (YYYY-MM-DD). Use with --start for a specific range.",
     )
     parser.add_argument(
+        "--last-week",
+        action="store_true",
+        help="Generate report for last Mon-Sun week, with cumulative monthly data.",
+    )
+    parser.add_argument(
         "--skip-upload",
         action="store_true",
         help="Skip uploading reports to Google Drive",
@@ -66,17 +71,30 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _check_idempotency(force: bool) -> bool:
-    """Check if reports for the current period already exist.
+def _get_last_week_range() -> tuple[str, str]:
+    """Return (start, end) date strings for last Monday–Sunday."""
+    today = date.today()
+    last_monday = today - timedelta(days=today.weekday() + 7)
+    last_sunday = last_monday + timedelta(days=6)
+    return last_monday.isoformat(), last_sunday.isoformat()
 
-    Returns True if pipeline should proceed, False to skip.
-    """
+
+def _get_month_to_date_start() -> str:
+    """Return the 1st of the current month as YYYY-MM-DD."""
+    today = date.today()
+    return today.replace(day=1).isoformat()
+
+
+def _check_idempotency(force: bool, week_label: str = None) -> bool:
+    """Check if reports for the period already exist."""
     if force:
         return True
 
-    now = datetime.now()
-    iso = now.isocalendar()
-    week_label = f"{iso[0]}_W{iso[1]:02d}"
+    if not week_label:
+        now = datetime.now()
+        iso = now.isocalendar()
+        week_label = f"{iso[0]}_W{iso[1]:02d}"
+
     expected_excel = config.REPORT_DIR / f"weekly_report_{week_label}.xlsx"
 
     if expected_excel.exists():
@@ -97,22 +115,31 @@ def run(
     force: bool,
     start_date: str = None,
     end_date: str = None,
+    last_week: bool = False,
 ) -> None:
     """Execute the full analytics pipeline."""
     logger.info("=== Starting Time Analytics Pipeline ===")
-    if start_date and end_date:
+
+    # Resolve --last-week mode
+    month_df = None
+    if last_week:
+        week_start, week_end = _get_last_week_range()
+        month_start = _get_month_to_date_start()
+        logger.info(
+            "Last-week mode: week %s to %s | month from %s | Upload: %s",
+            week_start, week_end, month_start,
+            "skip" if skip_upload else "enabled",
+        )
+    elif start_date and end_date:
         logger.info(
             "Range: %s to %s | Upload: %s",
-            start_date,
-            end_date,
+            start_date, end_date,
             "skip" if skip_upload else "enabled",
         )
     else:
         logger.info(
             "Lookback: %d days | Upload: %s | Incremental: %s",
-            days,
-            "skip" if skip_upload else "enabled",
-            incremental,
+            days, "skip" if skip_upload else "enabled", incremental,
         )
 
     # Idempotency check
@@ -120,37 +147,65 @@ def run(
         return
 
     # Step 1: Authenticate
-    logger.info("Step 1/6: Authenticating with Google APIs")
+    logger.info("Step 1/7: Authenticating with Google APIs")
     creds = authenticate()
 
     # Step 2: Fetch events
-    logger.info("Step 2/6: Fetching calendar events")
-    raw_df = fetch_events(
-        creds, days_back=days, incremental=incremental,
-        start_date=start_date, end_date=end_date,
-    )
+    logger.info("Step 2/7: Fetching calendar events")
+    if last_week:
+        # Fetch full month-to-date (covers both weekly and monthly needs)
+        raw_df = fetch_events(
+            creds, start_date=month_start, end_date=week_end,
+        )
+    else:
+        raw_df = fetch_events(
+            creds, days_back=days, incremental=incremental,
+            start_date=start_date, end_date=end_date,
+        )
     if raw_df.empty:
         logger.warning("No events found. Exiting.")
         return
 
     # Step 3: Process data
-    logger.info("Step 3/6: Processing events")
+    logger.info("Step 3/7: Processing events")
     processed_df = process_events(raw_df)
     if processed_df.empty:
         logger.warning("No events after processing. Exiting.")
         return
 
     # Step 4: Feature engineering
-    logger.info("Step 4/6: Engineering features")
+    logger.info("Step 4/7: Engineering features")
     featured_df = engineer_features(processed_df)
 
-    # Step 5: Compute analytics
-    logger.info("Step 5/6: Computing analytics")
-    analytics = compute_analytics(featured_df)
+    # Step 5: Split weekly and monthly data for --last-week mode
+    if last_week:
+        logger.info("Step 5/7: Splitting weekly and monthly data")
+        week_start_date = date.fromisoformat(week_start)
+        week_end_date = date.fromisoformat(week_end)
+        weekly_df = featured_df[
+            (featured_df["date"] >= week_start_date)
+            & (featured_df["date"] <= week_end_date)
+        ].copy()
+        month_df = featured_df  # full month-to-date
+        if weekly_df.empty:
+            logger.warning("No events in last week. Exiting.")
+            return
+        logger.info(
+            "Weekly: %d events (%.1fh) | Month-to-date: %d events (%.1fh)",
+            len(weekly_df), weekly_df["duration_hours"].sum(),
+            len(month_df), month_df["duration_hours"].sum(),
+        )
+    else:
+        logger.info("Step 5/7: No split needed (single range)")
+        weekly_df = featured_df
 
-    # Step 6: Generate reports
-    logger.info("Step 6/6: Generating reports")
-    report_files = generate_reports(featured_df, analytics)
+    # Step 6: Compute analytics (on weekly data)
+    logger.info("Step 6/7: Computing analytics")
+    analytics = compute_analytics(weekly_df)
+
+    # Step 7: Generate reports
+    logger.info("Step 7/7: Generating reports")
+    report_files = generate_reports(weekly_df, analytics, month_df=month_df)
 
     # Optional: Upload to Drive
     if not skip_upload:
@@ -161,7 +216,7 @@ def run(
     else:
         logger.info("Upload skipped (--skip-upload)")
 
-    # Save pipeline state for incremental runs
+    # Save pipeline state
     save_state({
         "last_run_utc": datetime.now(timezone.utc).isoformat(),
         "days_back": days,
@@ -172,10 +227,9 @@ def run(
 
     logger.info("=== Pipeline complete ===")
     logger.info(
-        "Summary: %.1f hours across %d events over %d days",
+        "Summary: %.1f hours across %d events",
         analytics.total_hours,
         analytics.total_events,
-        days,
     )
 
 
@@ -191,6 +245,7 @@ def main() -> None:
             force=args.force,
             start_date=args.start,
             end_date=args.end,
+            last_week=args.last_week,
         )
     except FileNotFoundError as e:
         logger.error(str(e))

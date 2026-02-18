@@ -13,25 +13,38 @@ from .analytics import AnalyticsResult
 logger = logging.getLogger(__name__)
 
 
-def generate_reports(df: pd.DataFrame, result: AnalyticsResult) -> list[Path]:
-    """Generate Excel and PNG reports. Returns list of created file paths."""
+def generate_reports(
+    df: pd.DataFrame,
+    result: AnalyticsResult,
+    month_df: pd.DataFrame = None,
+) -> list[Path]:
+    """Generate Excel and PNG reports.
+
+    Args:
+        df: Weekly event data (used for most sheets).
+        result: Analytics computed from weekly data.
+        month_df: Optional month-to-date data for the Monthly sheet.
+                  If None, monthly data is derived from df.
+    """
     config.REPORT_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Build period label from data (e.g. "2025_W03" or "2025-01")
     now = datetime.now()
     iso = now.isocalendar()
     week_label = f"{iso[0]}_W{iso[1]:02d}"
     month_label = now.strftime("%Y_%m")
 
     files = []
-    files.append(_generate_excel(df, result, week_label))
-    files.extend(_generate_charts(result, week_label, month_label))
+    files.append(_generate_excel(df, result, week_label, month_df=month_df))
+    files.extend(_generate_charts(result, week_label, month_label, month_df=month_df))
 
     logger.info("Generated %d report files in %s", len(files), config.REPORT_DIR)
     return files
 
 
-def _generate_excel(df: pd.DataFrame, result: AnalyticsResult, week_label: str) -> Path:
+def _generate_excel(
+    df: pd.DataFrame, result: AnalyticsResult, week_label: str,
+    month_df: pd.DataFrame = None,
+) -> Path:
     """Create Excel workbook with Summary, Weekly, Monthly, Categories sheets."""
     path = config.REPORT_DIR / f"weekly_report_{week_label}.xlsx"
 
@@ -67,9 +80,8 @@ def _generate_excel(df: pd.DataFrame, result: AnalyticsResult, week_label: str) 
         if not result.weekly_hours.empty:
             result.weekly_hours.to_excel(writer, sheet_name="Weekly", index=False)
 
-        # Monthly sheet
-        if not result.monthly_hours.empty:
-            result.monthly_hours.to_excel(writer, sheet_name="Monthly", index=False)
+        # Monthly sheet — cumulative month-to-date if available
+        _write_monthly_sheet(writer, result, month_df)
 
         # Categories sheet
         if not result.category_ratios.empty:
@@ -89,6 +101,54 @@ def _generate_excel(df: pd.DataFrame, result: AnalyticsResult, week_label: str) 
 
     logger.info("Excel report: %s", path)
     return path
+
+
+def _write_monthly_sheet(
+    writer: pd.ExcelWriter, result: AnalyticsResult, month_df: pd.DataFrame = None,
+) -> None:
+    """Write the Monthly sheet with cumulative month-to-date data."""
+    if month_df is not None and not month_df.empty:
+        # Cumulative monthly breakdown by category and week
+        monthly_by_cat = (
+            month_df.groupby(["category"])["duration_hours"]
+            .sum()
+            .reset_index()
+            .rename(columns={"duration_hours": "hours"})
+            .sort_values("hours", ascending=False)
+        )
+        monthly_by_cat["hours"] = monthly_by_cat["hours"].round(2)
+
+        # Weekly breakdown within the month
+        monthly_by_week = (
+            month_df.groupby(["iso_week"])["duration_hours"]
+            .sum()
+            .reset_index()
+            .rename(columns={"duration_hours": "hours"})
+            .sort_values("iso_week")
+        )
+        monthly_by_week["hours"] = monthly_by_week["hours"].round(2)
+
+        # Total row
+        total_hours = round(month_df["duration_hours"].sum(), 2)
+        total_events = len(month_df)
+
+        # Write month summary at top
+        month_summary = pd.DataFrame([
+            {"Metric": "Month Total Hours", "Value": total_hours},
+            {"Metric": "Month Total Events", "Value": total_events},
+        ])
+        month_summary.to_excel(writer, sheet_name="Monthly", index=False, startrow=0)
+
+        # Category breakdown
+        row = len(month_summary) + 2
+        monthly_by_cat.to_excel(writer, sheet_name="Monthly", index=False, startrow=row)
+
+        # Weekly breakdown
+        row += len(monthly_by_cat) + 2
+        monthly_by_week.to_excel(writer, sheet_name="Monthly", index=False, startrow=row)
+    elif not result.monthly_hours.empty:
+        # Fallback: use analytics result
+        result.monthly_hours.to_excel(writer, sheet_name="Monthly", index=False)
 
 
 def _write_details(df: pd.DataFrame, writer: pd.ExcelWriter) -> None:
@@ -155,13 +215,32 @@ def _write_details(df: pd.DataFrame, writer: pd.ExcelWriter) -> None:
 
 
 def _generate_charts(
-    result: AnalyticsResult, week_label: str, month_label: str
+    result: AnalyticsResult, week_label: str, month_label: str,
+    month_df: pd.DataFrame = None,
 ) -> list[Path]:
     """Generate PNG charts and return list of file paths."""
     files = []
 
-    # Monthly bar chart
-    if not result.monthly_hours.empty:
+    # Monthly bar chart — use cumulative month_df if available
+    if month_df is not None and not month_df.empty:
+        path = config.REPORT_DIR / f"monthly_report_{month_label}.png"
+        cat_hours = (
+            month_df.groupby("category")["duration_hours"]
+            .sum()
+            .sort_values(ascending=False)
+        )
+        fig, ax = plt.subplots(figsize=(10, 5))
+        ax.bar(cat_hours.index, cat_hours.values, color="#4285f4")
+        ax.set_title(f"Month-to-Date Hours by Category ({month_label.replace('_', '-')})")
+        ax.set_xlabel("Category")
+        ax.set_ylabel("Hours")
+        plt.xticks(rotation=45, ha="right")
+        plt.tight_layout()
+        fig.savefig(path, dpi=150)
+        plt.close(fig)
+        files.append(path)
+        logger.info("Chart: %s", path)
+    elif not result.monthly_hours.empty:
         path = config.REPORT_DIR / f"monthly_report_{month_label}.png"
         fig, ax = plt.subplots(figsize=(10, 5))
         ax.bar(result.monthly_hours["month"], result.monthly_hours["hours"], color="#4285f4")
