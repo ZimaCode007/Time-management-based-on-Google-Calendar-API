@@ -1,0 +1,40 @@
+name: Weekly Time Analytics
+
+on:
+  schedule:
+    # Run every Monday at 06:00 UTC (08:00 Europe/Berlin)
+    - cron: "0 6 * * 1"
+  workflow_dispatch: # Allow manual trigger
+
+jobs:
+  run-analytics:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Write Google credentials
+        run: echo '${{ secrets.GOOGLE_CREDENTIALS_JSON }}' > credentials.json
+
+      - name: Write OAuth token
+        run: echo '${{ secrets.GOOGLE_TOKEN_JSON }}' > token.json
+
+      - name: Run analytics pipeline
+        run: python -m time_analytics.main --days 7
+
+      - name: Upload reports as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: time-analytics-reports
+          path: reports/
+          retention-days: 30
