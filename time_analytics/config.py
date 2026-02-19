@@ -2,6 +2,7 @@ import os
 import re
 from pathlib import Path
 
+
 # Base directory (project root)
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -36,3 +37,7 @@ STATE_FILE = BASE_DIR / "data" / "pipeline_state.json"
 
 # Google Drive upload folder name
 DRIVE_FOLDER_NAME = "Time Analytics Reports"
+
+# Notion integration
+NOTION_TOKEN = os.getenv("NOTION_TOKEN", "")
+NOTION_PARENT_PAGE_ID = os.getenv("NOTION_PARENT_PAGE_ID", "")

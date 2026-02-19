@@ -14,6 +14,7 @@ MIME_TYPES = {
     ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     ".png": "image/png",
     ".pdf": "application/pdf",
+    ".html": "text/html",
 }
 
 

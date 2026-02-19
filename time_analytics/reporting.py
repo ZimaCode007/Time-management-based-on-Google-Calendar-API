@@ -4,8 +4,9 @@ from pathlib import Path
 
 import matplotlib
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
 
 from . import config
 from .analytics import AnalyticsResult
@@ -18,10 +19,10 @@ def generate_reports(
     result: AnalyticsResult,
     month_df: pd.DataFrame = None,
 ) -> list[Path]:
-    """Generate Excel and PNG reports.
+    """Generate Excel and chart reports.
 
     Args:
-        df: Weekly event data (used for most sheets).
+        df: Weekly event data.
         result: Analytics computed from weekly data.
         month_df: Optional month-to-date data for the Monthly sheet.
                   If None, monthly data is derived from df.
@@ -45,11 +46,11 @@ def _generate_excel(
     df: pd.DataFrame, result: AnalyticsResult, week_label: str,
     month_df: pd.DataFrame = None,
 ) -> Path:
-    """Create Excel workbook with Summary, Weekly, Monthly, Categories sheets."""
+    """Create Excel workbook with 3 sheets: Summary, Weekly, Monthly."""
     path = config.REPORT_DIR / f"weekly_report_{week_label}.xlsx"
 
     with pd.ExcelWriter(path, engine="openpyxl") as writer:
-        # Summary sheet
+        # Sheet 1: Summary — metrics table
         summary = pd.DataFrame(
             {
                 "Metric": [
@@ -76,83 +77,27 @@ def _generate_excel(
         )
         summary.to_excel(writer, sheet_name="Summary", index=False)
 
-        # Weekly sheet
-        if not result.weekly_hours.empty:
-            result.weekly_hours.to_excel(writer, sheet_name="Weekly", index=False)
-
-        # Monthly sheet — cumulative month-to-date if available
-        _write_monthly_sheet(writer, result, month_df)
-
-        # Categories sheet
-        if not result.category_ratios.empty:
-            result.category_ratios.to_excel(writer, sheet_name="Categories", index=False)
-
-        # Details sheet — per-job hour breakdown
+        # Sheet 2: Weekly — job-level breakdown for the week
         if "category" in df.columns and "duration_hours" in df.columns:
-            _write_details(df, writer)
+            _write_details_sheet(df, writer, "Weekly")
 
-        # Raw data sheet
-        export_cols = [
-            c for c in ["date", "summary", "calendar_name", "category", "duration_hours", "day_of_week", "iso_week"]
-            if c in df.columns
-        ]
-        if export_cols:
-            df[export_cols].to_excel(writer, sheet_name="Raw Data", index=False)
+        # Sheet 3: Monthly — job-level breakdown for the month
+        target_df = month_df if (month_df is not None and not month_df.empty) else df
+        if "category" in target_df.columns and "duration_hours" in target_df.columns:
+            _write_details_sheet(target_df, writer, "Monthly")
 
     logger.info("Excel report: %s", path)
     return path
 
 
-def _write_monthly_sheet(
-    writer: pd.ExcelWriter, result: AnalyticsResult, month_df: pd.DataFrame = None,
-) -> None:
-    """Write the Monthly sheet with cumulative month-to-date data."""
-    if month_df is not None and not month_df.empty:
-        # Cumulative monthly breakdown by category and week
-        monthly_by_cat = (
-            month_df.groupby(["category"])["duration_hours"]
-            .sum()
-            .reset_index()
-            .rename(columns={"duration_hours": "hours"})
-            .sort_values("hours", ascending=False)
-        )
-        monthly_by_cat["hours"] = monthly_by_cat["hours"].round(2)
+def _write_details_sheet(df: pd.DataFrame, writer: pd.ExcelWriter, sheet_name: str) -> None:
+    """Write a sheet with Job Summary table on top and Event Log below.
 
-        # Weekly breakdown within the month
-        monthly_by_week = (
-            month_df.groupby(["iso_week"])["duration_hours"]
-            .sum()
-            .reset_index()
-            .rename(columns={"duration_hours": "hours"})
-            .sort_values("iso_week")
-        )
-        monthly_by_week["hours"] = monthly_by_week["hours"].round(2)
-
-        # Total row
-        total_hours = round(month_df["duration_hours"].sum(), 2)
-        total_events = len(month_df)
-
-        # Write month summary at top
-        month_summary = pd.DataFrame([
-            {"Metric": "Month Total Hours", "Value": total_hours},
-            {"Metric": "Month Total Events", "Value": total_events},
-        ])
-        month_summary.to_excel(writer, sheet_name="Monthly", index=False, startrow=0)
-
-        # Category breakdown
-        row = len(month_summary) + 2
-        monthly_by_cat.to_excel(writer, sheet_name="Monthly", index=False, startrow=row)
-
-        # Weekly breakdown
-        row += len(monthly_by_cat) + 2
-        monthly_by_week.to_excel(writer, sheet_name="Monthly", index=False, startrow=row)
-    elif not result.monthly_hours.empty:
-        # Fallback: use analytics result
-        result.monthly_hours.to_excel(writer, sheet_name="Monthly", index=False)
-
-
-def _write_details(df: pd.DataFrame, writer: pd.ExcelWriter) -> None:
-    """Write a Details sheet with job summary + full event log."""
+    Args:
+        df: Event DataFrame with at least category, summary, duration_hours, date columns.
+        writer: Active ExcelWriter instance.
+        sheet_name: Name of the sheet to write to.
+    """
     # --- Part 1: Job Summary table (top) ---
     job_summary = (
         df.groupby(["category", "summary"])
@@ -202,96 +147,129 @@ def _write_details(df: pd.DataFrame, writer: pd.ExcelWriter) -> None:
     detail_df["Hours"] = detail_df["Hours"].round(2)
     detail_df["Date"] = detail_df["Date"].astype(str)
 
-    # Write both to the same sheet: summary on top, detail below
+    # Write job summary at top
     start_row = 0
-    summary_df.to_excel(writer, sheet_name="Details", index=False, startrow=start_row)
+    summary_df.to_excel(writer, sheet_name=sheet_name, index=False, startrow=start_row)
 
-    # Gap of 2 rows, then detail table
+    # Gap of 2 rows, then event log
     detail_start = start_row + len(summary_df) + 3
-    # Section header
     header_df = pd.DataFrame([{"Date": "--- Event Log ---", "Category": "", "Job": "", "Hours": ""}])
-    header_df.to_excel(writer, sheet_name="Details", index=False, startrow=detail_start - 1, header=False)
-    detail_df.to_excel(writer, sheet_name="Details", index=False, startrow=detail_start)
+    header_df.to_excel(writer, sheet_name=sheet_name, index=False, startrow=detail_start - 1, header=False)
+    detail_df.to_excel(writer, sheet_name=sheet_name, index=False, startrow=detail_start)
+
+
+def _save_plotly_fig(fig: go.Figure, base_path: Path) -> list[Path]:
+    """Export a Plotly figure as both HTML and PNG.
+
+    Args:
+        fig: Plotly figure to export.
+        base_path: Path without extension (e.g. reports/weekly_trend_2026_W07).
+
+    Returns:
+        [html_path, png_path]
+    """
+    html_path = base_path.with_suffix(".html")
+    png_path = base_path.with_suffix(".png")
+
+    fig.write_html(str(html_path), include_plotlyjs="cdn")
+    fig.write_image(str(png_path), width=1000, height=500, scale=1.5)
+
+    return [html_path, png_path]
 
 
 def _generate_charts(
     result: AnalyticsResult, week_label: str, month_label: str,
     month_df: pd.DataFrame = None,
 ) -> list[Path]:
-    """Generate PNG charts and return list of file paths."""
+    """Generate Plotly charts (HTML + PNG) and return list of file paths."""
     files = []
 
-    # Monthly bar chart — use cumulative month_df if available
+    # Chart 1: Monthly bar — hours by category (cumulative month-to-date)
     if month_df is not None and not month_df.empty:
-        path = config.REPORT_DIR / f"monthly_report_{month_label}.png"
         cat_hours = (
             month_df.groupby("category")["duration_hours"]
             .sum()
-            .sort_values(ascending=False)
+            .reset_index()
+            .rename(columns={"duration_hours": "hours"})
+            .sort_values("hours", ascending=False)
         )
-        fig, ax = plt.subplots(figsize=(10, 5))
-        ax.bar(cat_hours.index, cat_hours.values, color="#4285f4")
-        ax.set_title(f"Month-to-Date Hours by Category ({month_label.replace('_', '-')})")
-        ax.set_xlabel("Category")
-        ax.set_ylabel("Hours")
-        plt.xticks(rotation=45, ha="right")
-        plt.tight_layout()
-        fig.savefig(path, dpi=150)
-        plt.close(fig)
-        files.append(path)
-        logger.info("Chart: %s", path)
+        cat_hours["hours"] = cat_hours["hours"].round(2)
+        fig = px.bar(
+            cat_hours,
+            x="category",
+            y="hours",
+            color="category",
+            text="hours",
+            title=f"Month-to-Date Hours by Category ({month_label.replace('_', '-')})",
+            labels={"category": "Category", "hours": "Hours"},
+            template="plotly_white",
+        )
+        fig.update_traces(textposition="outside")
+        fig.update_layout(showlegend=False)
+        base = config.REPORT_DIR / f"monthly_report_{month_label}"
+        files.extend(_save_plotly_fig(fig, base))
+        logger.info("Chart: %s (.html + .png)", base)
     elif not result.monthly_hours.empty:
-        path = config.REPORT_DIR / f"monthly_report_{month_label}.png"
-        fig, ax = plt.subplots(figsize=(10, 5))
-        ax.bar(result.monthly_hours["month"], result.monthly_hours["hours"], color="#4285f4")
-        ax.set_title("Hours per Month")
-        ax.set_xlabel("Month")
-        ax.set_ylabel("Hours")
-        plt.xticks(rotation=45, ha="right")
-        plt.tight_layout()
-        fig.savefig(path, dpi=150)
-        plt.close(fig)
-        files.append(path)
-        logger.info("Chart: %s", path)
+        fig = px.bar(
+            result.monthly_hours,
+            x="month",
+            y="hours",
+            text="hours",
+            title="Hours per Month",
+            labels={"month": "Month", "hours": "Hours"},
+            template="plotly_white",
+        )
+        fig.update_traces(textposition="outside")
+        base = config.REPORT_DIR / f"monthly_report_{month_label}"
+        files.extend(_save_plotly_fig(fig, base))
+        logger.info("Chart: %s (.html + .png)", base)
 
-    # Weekly trend line
+    # Chart 2: Weekly trend line
     if not result.weekly_hours.empty:
-        path = config.REPORT_DIR / f"weekly_trend_{week_label}.png"
-        fig, ax = plt.subplots(figsize=(10, 5))
-        ax.plot(
-            result.weekly_hours["iso_week"],
-            result.weekly_hours["hours"],
-            marker="o",
-            color="#0f9d58",
-            linewidth=2,
+        weekly = result.weekly_hours.copy()
+        weekly["hours"] = weekly["hours"].round(2)
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=weekly["iso_week"].astype(str),
+            y=weekly["hours"],
+            mode="lines+markers+text",
+            text=weekly["hours"],
+            textposition="top center",
+            line=dict(color="#0f9d58", width=2),
+            marker=dict(size=8),
+            name="Hours",
+        ))
+        fig.update_layout(
+            title="Weekly Hours Trend",
+            xaxis_title="Week",
+            yaxis_title="Hours",
+            template="plotly_white",
         )
-        ax.set_title("Weekly Hours Trend")
-        ax.set_xlabel("Week")
-        ax.set_ylabel("Hours")
-        plt.xticks(rotation=45, ha="right")
-        plt.tight_layout()
-        fig.savefig(path, dpi=150)
-        plt.close(fig)
-        files.append(path)
-        logger.info("Chart: %s", path)
+        base = config.REPORT_DIR / f"weekly_trend_{week_label}"
+        files.extend(_save_plotly_fig(fig, base))
+        logger.info("Chart: %s (.html + .png)", base)
 
-    # Category bar chart
+    # Chart 3: Category horizontal bar
     if not result.category_hours.empty:
-        path = config.REPORT_DIR / f"category_distribution_{week_label}.png"
-        fig, ax = plt.subplots(figsize=(10, 5))
-        colors = plt.cm.Set2.colors
-        bars = ax.barh(
-            result.category_hours["category"],
-            result.category_hours["hours"],
-            color=[colors[i % len(colors)] for i in range(len(result.category_hours))],
+        cat = result.category_hours.copy()
+        cat["hours"] = cat["hours"].round(2)
+        # Reverse order so highest is at top
+        cat = cat.sort_values("hours", ascending=True)
+        fig = px.bar(
+            cat,
+            x="hours",
+            y="category",
+            orientation="h",
+            color="category",
+            text="hours",
+            title="Hours by Category (This Week)",
+            labels={"category": "Category", "hours": "Hours"},
+            template="plotly_white",
         )
-        ax.set_title("Hours by Category")
-        ax.set_xlabel("Hours")
-        ax.invert_yaxis()
-        plt.tight_layout()
-        fig.savefig(path, dpi=150)
-        plt.close(fig)
-        files.append(path)
-        logger.info("Chart: %s", path)
+        fig.update_traces(textposition="outside")
+        fig.update_layout(showlegend=False, yaxis=dict(autorange="reversed"))
+        base = config.REPORT_DIR / f"category_distribution_{week_label}"
+        files.extend(_save_plotly_fig(fig, base))
+        logger.info("Chart: %s (.html + .png)", base)
 
     return files

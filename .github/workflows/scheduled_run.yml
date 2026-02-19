@@ -30,6 +30,9 @@ jobs:
         run: echo '${{ secrets.GOOGLE_TOKEN_JSON }}' > token.json
 
       - name: Run analytics pipeline
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          NOTION_PARENT_PAGE_ID: ${{ secrets.NOTION_PARENT_PAGE_ID }}
         run: python -m time_analytics.main --last-week
 
       - name: Upload reports as artifact

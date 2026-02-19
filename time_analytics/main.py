@@ -14,6 +14,7 @@ from .analytics import compute_analytics
 from .data_ingestion import authenticate, fetch_events, load_state, save_state
 from .drive_uploader import upload_reports
 from .feature_engineering import engineer_features
+from .notion_uploader import upload_to_notion
 from .processing import process_events
 from .reporting import generate_reports
 
@@ -68,6 +69,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Force run even if reports already exist for this period",
     )
+    parser.add_argument(
+        "--skip-notion",
+        action="store_true",
+        help="Skip uploading data to Notion databases",
+    )
     return parser.parse_args()
 
 
@@ -116,6 +122,7 @@ def run(
     start_date: str = None,
     end_date: str = None,
     last_week: bool = False,
+    skip_notion: bool = False,
 ) -> None:
     """Execute the full analytics pipeline."""
     logger.info("=== Starting Time Analytics Pipeline ===")
@@ -216,6 +223,33 @@ def run(
     else:
         logger.info("Upload skipped (--skip-upload)")
 
+    # Optional: Upload to Notion
+    if config.NOTION_TOKEN and not skip_notion:
+        logger.info("Uploading data to Notion")
+        now = datetime.now()
+        iso = now.isocalendar()
+        week_label = f"{iso[0]}_W{iso[1]:02d}"
+        try:
+            notion_results = upload_to_notion(
+                notion_token=config.NOTION_TOKEN,
+                df=weekly_df,
+                result=analytics,
+                week_label=week_label,
+                force=force,
+                parent_page_id=config.NOTION_PARENT_PAGE_ID,
+            )
+            for item in notion_results:
+                logger.info(
+                    "  Notion %s: %s (%d rows)",
+                    item["database"], item["action"], item["count"],
+                )
+        except Exception:
+            logger.exception("Notion upload failed (non-fatal)")
+    elif skip_notion:
+        logger.info("Notion upload skipped (--skip-notion)")
+    else:
+        logger.info("Notion upload skipped (NOTION_TOKEN not set)")
+
     # Save pipeline state
     save_state({
         "last_run_utc": datetime.now(timezone.utc).isoformat(),
@@ -246,6 +280,7 @@ def main() -> None:
             start_date=args.start,
             end_date=args.end,
             last_week=args.last_week,
+            skip_notion=args.skip_notion,
         )
     except FileNotFoundError as e:
         logger.error(str(e))
