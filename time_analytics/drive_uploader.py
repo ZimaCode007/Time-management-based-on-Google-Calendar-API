@@ -1,5 +1,5 @@
 import logging
-from datetime import datetime
+from datetime import date
 from pathlib import Path
 
 from google.oauth2.credentials import Credentials
@@ -18,17 +18,28 @@ MIME_TYPES = {
 }
 
 
-def upload_reports(creds: Credentials, files: list[Path]) -> list[dict]:
-    """Upload report files to Google Drive, organized by Year-Month.
+def upload_reports(creds: Credentials, files: list[Path], week_label: str = None) -> list[dict]:
+    """Upload report files to Google Drive, organized by Year-Month/Year-WNN.
 
-    Structure: Time Analytics Reports / 2026-02 / files...
+    Structure: Time Analytics Reports / 2026-02 / 2026-W08 / files...
     """
     service = build("drive", "v3", credentials=creds)
     root_id = _get_or_create_folder(service, config.DRIVE_FOLDER_NAME)
 
-    # Create Year-Month subfolder (e.g. "2026-02")
-    month_label = datetime.now().strftime("%Y-%m")
-    month_folder_id = _get_or_create_folder(service, month_label, parent_id=root_id)
+    # Derive month_name and week_name from week_label (e.g. "2026_W08")
+    if week_label:
+        year_str, wnum_str = week_label.split("_W")
+        monday = date.fromisocalendar(int(year_str), int(wnum_str), 1)
+        month_name = monday.strftime("%Y-%m")      # e.g. "2026-02"
+        week_name = f"{year_str}-W{wnum_str}"      # e.g. "2026-W08"
+    else:
+        today = date.today()
+        month_name = today.strftime("%Y-%m")
+        iso = today.isocalendar()
+        week_name = f"{iso[0]}-W{iso[1]:02d}"
+
+    month_folder_id = _get_or_create_folder(service, month_name, parent_id=root_id)
+    week_folder_id = _get_or_create_folder(service, week_name, parent_id=month_folder_id)
 
     uploaded = []
     for file_path in files:
@@ -39,7 +50,7 @@ def upload_reports(creds: Credentials, files: list[Path]) -> list[dict]:
         mime = MIME_TYPES.get(file_path.suffix, "application/octet-stream")
         file_metadata = {
             "name": file_path.name,
-            "parents": [month_folder_id],
+            "parents": [week_folder_id],
         }
         media = MediaFileUpload(str(file_path), mimetype=mime)
 
@@ -54,8 +65,8 @@ def upload_reports(creds: Credentials, files: list[Path]) -> list[dict]:
         logger.info("Uploaded %s -> %s", file_path.name, link)
 
     logger.info(
-        "Uploaded %d files to Drive: %s/%s",
-        len(uploaded), config.DRIVE_FOLDER_NAME, month_label,
+        "Uploaded %d files to Drive: %s/%s/%s",
+        len(uploaded), config.DRIVE_FOLDER_NAME, month_name, week_name,
     )
     return uploaded
 

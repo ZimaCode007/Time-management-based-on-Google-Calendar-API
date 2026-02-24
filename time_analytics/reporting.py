@@ -1,5 +1,5 @@
 import logging
-from datetime import datetime
+from datetime import date
 from pathlib import Path
 
 import matplotlib
@@ -18,6 +18,8 @@ def generate_reports(
     df: pd.DataFrame,
     result: AnalyticsResult,
     month_df: pd.DataFrame = None,
+    week_label: str = None,
+    month_label: str = None,
 ) -> list[Path]:
     """Generate Excel and chart reports.
 
@@ -26,28 +28,37 @@ def generate_reports(
         result: Analytics computed from weekly data.
         month_df: Optional month-to-date data for the Monthly sheet.
                   If None, monthly data is derived from df.
+        week_label: e.g. "2026_W08". Derived from df's max date if not provided.
+        month_label: e.g. "2026_02". Derived from df's max date if not provided.
     """
-    config.REPORT_DIR.mkdir(parents=True, exist_ok=True)
+    if week_label is None:
+        max_date = pd.to_datetime(df["date"].max()).date() if not df.empty else date.today()
+        iso = max_date.isocalendar()
+        week_label = f"{iso[0]}_W{iso[1]:02d}"
+    if month_label is None:
+        max_date = pd.to_datetime(df["date"].max()).date() if not df.empty else date.today()
+        month_label = max_date.strftime("%Y_%m")
 
-    now = datetime.now()
-    iso = now.isocalendar()
-    week_label = f"{iso[0]}_W{iso[1]:02d}"
-    month_label = now.strftime("%Y_%m")
+    # Subfolder: reports/YYYY-MM/WNN/
+    month_folder = month_label.replace("_", "-")          # e.g. "2026-02"
+    week_folder = "W" + week_label.split("_W")[1]         # e.g. "W08"
+    out_dir = config.REPORT_DIR / month_folder / week_folder
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     files = []
-    files.append(_generate_excel(df, result, week_label, month_df=month_df))
-    files.extend(_generate_charts(result, week_label, month_label, month_df=month_df))
+    files.append(_generate_excel(df, result, week_label, out_dir, month_df=month_df))
+    files.extend(_generate_charts(result, week_label, month_label, out_dir, month_df=month_df))
 
-    logger.info("Generated %d report files in %s", len(files), config.REPORT_DIR)
+    logger.info("Generated %d report files in %s", len(files), out_dir)
     return files
 
 
 def _generate_excel(
     df: pd.DataFrame, result: AnalyticsResult, week_label: str,
-    month_df: pd.DataFrame = None,
+    out_dir: Path, month_df: pd.DataFrame = None,
 ) -> Path:
     """Create Excel workbook with 3 sheets: Summary, Weekly, Monthly."""
-    path = config.REPORT_DIR / f"weekly_report_{week_label}.xlsx"
+    path = out_dir / f"weekly_report_{week_label}.xlsx"
 
     with pd.ExcelWriter(path, engine="openpyxl") as writer:
         # Sheet 1: Summary — metrics table
@@ -179,7 +190,7 @@ def _save_plotly_fig(fig: go.Figure, base_path: Path) -> list[Path]:
 
 def _generate_charts(
     result: AnalyticsResult, week_label: str, month_label: str,
-    month_df: pd.DataFrame = None,
+    out_dir: Path, month_df: pd.DataFrame = None,
 ) -> list[Path]:
     """Generate Plotly charts (HTML + PNG) and return list of file paths."""
     files = []
@@ -206,7 +217,7 @@ def _generate_charts(
         )
         fig.update_traces(textposition="outside")
         fig.update_layout(showlegend=False)
-        base = config.REPORT_DIR / f"monthly_report_{month_label}"
+        base = out_dir / f"monthly_report_{month_label}"
         files.extend(_save_plotly_fig(fig, base))
         logger.info("Chart: %s (.html + .png)", base)
     elif not result.monthly_hours.empty:
@@ -220,7 +231,7 @@ def _generate_charts(
             template="plotly_white",
         )
         fig.update_traces(textposition="outside")
-        base = config.REPORT_DIR / f"monthly_report_{month_label}"
+        base = out_dir / f"monthly_report_{month_label}"
         files.extend(_save_plotly_fig(fig, base))
         logger.info("Chart: %s (.html + .png)", base)
 
@@ -245,7 +256,7 @@ def _generate_charts(
             yaxis_title="Hours",
             template="plotly_white",
         )
-        base = config.REPORT_DIR / f"weekly_trend_{week_label}"
+        base = out_dir / f"weekly_trend_{week_label}"
         files.extend(_save_plotly_fig(fig, base))
         logger.info("Chart: %s (.html + .png)", base)
 
@@ -268,7 +279,7 @@ def _generate_charts(
         )
         fig.update_traces(textposition="outside")
         fig.update_layout(showlegend=False, yaxis=dict(autorange="reversed"))
-        base = config.REPORT_DIR / f"category_distribution_{week_label}"
+        base = out_dir / f"category_distribution_{week_label}"
         files.extend(_save_plotly_fig(fig, base))
         logger.info("Chart: %s (.html + .png)", base)
 

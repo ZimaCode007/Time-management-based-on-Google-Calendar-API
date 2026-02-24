@@ -8,6 +8,7 @@ import argparse
 import logging
 import sys
 from datetime import date, datetime, timedelta, timezone
+from typing import Iterator
 
 from . import config
 from .analytics import compute_analytics
@@ -41,7 +42,7 @@ def parse_args() -> argparse.Namespace:
         "--start",
         type=str,
         default=None,
-        help="Start date (YYYY-MM-DD). Use with --end for a specific range.",
+        help="Start date (YYYY-MM-DD). Backfill start with --all-weeks; use with --end for explicit range.",
     )
     parser.add_argument(
         "--end",
@@ -74,6 +75,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Skip uploading data to Notion databases",
     )
+    parser.add_argument(
+        "--all-weeks",
+        action="store_true",
+        help="Backfill reports for every complete week from --start (default: Jan 1) to last week.",
+    )
     return parser.parse_args()
 
 
@@ -91,6 +97,28 @@ def _get_month_to_date_start() -> str:
     return today.replace(day=1).isoformat()
 
 
+def _get_week_label(week_end_date: date) -> str:
+    """Return ISO week label like '2026_W08' from the week-end (Sunday) date."""
+    iso = week_end_date.isocalendar()
+    return f"{iso[0]}_W{iso[1]:02d}"
+
+
+def _get_month_label(d: date) -> str:
+    """Return month label like '2026_02' from a date."""
+    return d.strftime("%Y_%m")
+
+
+def _iter_weeks(start: date, end: date) -> Iterator[tuple[date, date]]:
+    """Yield (monday, sunday) pairs for every complete week from start to end."""
+    monday = start - timedelta(days=start.weekday())
+    while True:
+        sunday = monday + timedelta(days=6)
+        if sunday > end:
+            break
+        yield monday, sunday
+        monday += timedelta(days=7)
+
+
 def _check_idempotency(force: bool, week_label: str = None) -> bool:
     """Check if reports for the period already exist."""
     if force:
@@ -101,13 +129,12 @@ def _check_idempotency(force: bool, week_label: str = None) -> bool:
         iso = now.isocalendar()
         week_label = f"{iso[0]}_W{iso[1]:02d}"
 
-    expected_excel = config.REPORT_DIR / f"weekly_report_{week_label}.xlsx"
-
-    if expected_excel.exists():
+    matches = list(config.REPORT_DIR.glob(f"**/weekly_report_{week_label}.xlsx"))
+    if matches:
         logger.info(
             "Report for %s already exists: %s. Use --force to regenerate.",
             week_label,
-            expected_excel,
+            matches[0],
         )
         return False
 
@@ -127,30 +154,38 @@ def run(
     """Execute the full analytics pipeline."""
     logger.info("=== Starting Time Analytics Pipeline ===")
 
-    # Resolve --last-week mode
+    # Resolve --last-week mode and compute correct labels from data dates (not datetime.now())
     month_df = None
     if last_week:
         week_start, week_end = _get_last_week_range()
         month_start = _get_month_to_date_start()
+        week_end_date = date.fromisoformat(week_end)
+        week_label = _get_week_label(week_end_date)
+        month_label = _get_month_label(week_end_date)
         logger.info(
             "Last-week mode: week %s to %s | month from %s | Upload: %s",
             week_start, week_end, month_start,
             "skip" if skip_upload else "enabled",
         )
     elif start_date and end_date:
+        week_label = _get_week_label(date.fromisoformat(end_date))
+        month_label = _get_month_label(date.fromisoformat(end_date))
         logger.info(
             "Range: %s to %s | Upload: %s",
             start_date, end_date,
             "skip" if skip_upload else "enabled",
         )
     else:
+        _ref = date.today() - timedelta(days=1)
+        week_label = _get_week_label(_ref)
+        month_label = _get_month_label(_ref)
         logger.info(
             "Lookback: %d days | Upload: %s | Incremental: %s",
             days, "skip" if skip_upload else "enabled", incremental,
         )
 
     # Idempotency check
-    if not _check_idempotency(force):
+    if not _check_idempotency(force, week_label=week_label):
         return
 
     # Step 1: Authenticate
@@ -212,12 +247,13 @@ def run(
 
     # Step 7: Generate reports
     logger.info("Step 7/7: Generating reports")
-    report_files = generate_reports(weekly_df, analytics, month_df=month_df)
+    report_files = generate_reports(weekly_df, analytics, month_df=month_df,
+                                    week_label=week_label, month_label=month_label)
 
     # Optional: Upload to Drive
     if not skip_upload:
         logger.info("Uploading reports to Google Drive")
-        links = upload_reports(creds, report_files)
+        links = upload_reports(creds, report_files, week_label=week_label)
         for item in links:
             logger.info("  %s: %s", item["name"], item["link"])
     else:
@@ -226,9 +262,6 @@ def run(
     # Optional: Upload to Notion
     if config.NOTION_TOKEN and not skip_notion:
         logger.info("Uploading data to Notion")
-        now = datetime.now()
-        iso = now.isocalendar()
-        week_label = f"{iso[0]}_W{iso[1]:02d}"
         try:
             notion_results = upload_to_notion(
                 notion_token=config.NOTION_TOKEN,
@@ -267,21 +300,120 @@ def run(
     )
 
 
+def run_all_weeks(
+    start_str: str = None,
+    force: bool = False,
+    skip_upload: bool = False,
+    skip_notion: bool = False,
+) -> None:
+    """Backfill reports for every complete week from start_str to last complete week."""
+    logger.info("=== Starting Backfill (all-weeks mode) ===")
+    today = date.today()
+    overall_start = date.fromisoformat(start_str) if start_str else date(today.year, 1, 1)
+    _, last_week_end_str = _get_last_week_range()
+    last_week_end = date.fromisoformat(last_week_end_str)
+
+    if overall_start > last_week_end:
+        logger.warning("Start date is after last complete week. Nothing to do.")
+        return
+
+    # Month-align fetch start for monthly context
+    fetch_start = overall_start.replace(day=1)
+
+    # 1. Auth + single bulk fetch covering all weeks
+    creds = authenticate()
+    raw_df = fetch_events(creds, start_date=fetch_start.isoformat(), end_date=last_week_end_str)
+    if raw_df.empty:
+        logger.warning("No events found. Exiting.")
+        return
+
+    # 2. Process + feature-engineer once on all data
+    processed_df = process_events(raw_df)
+    if processed_df.empty:
+        logger.warning("No events after processing. Exiting.")
+        return
+    all_featured_df = engineer_features(processed_df)
+
+    # 3. Loop per week
+    weeks = list(_iter_weeks(overall_start, last_week_end))
+    logger.info("Processing %d weeks", len(weeks))
+    for i, (monday, sunday) in enumerate(weeks, 1):
+        week_label = _get_week_label(sunday)
+        month_label = _get_month_label(sunday)
+        logger.info(
+            "Week %d/%d: %s (%s to %s)", i, len(weeks), week_label, monday, sunday
+        )
+
+        if not _check_idempotency(force, week_label=week_label):
+            continue  # skip this week, not the whole run
+
+        weekly_df = all_featured_df[
+            (all_featured_df["date"] >= monday) & (all_featured_df["date"] <= sunday)
+        ].copy()
+        if weekly_df.empty:
+            logger.warning("No events for %s, skipping", week_label)
+            continue
+
+        month_start = sunday.replace(day=1)
+        month_df = all_featured_df[
+            (all_featured_df["date"] >= month_start) & (all_featured_df["date"] <= sunday)
+        ].copy()
+
+        analytics = compute_analytics(weekly_df)
+        report_files = generate_reports(
+            weekly_df, analytics, month_df=month_df,
+            week_label=week_label, month_label=month_label,
+        )
+
+        if not skip_upload:
+            links = upload_reports(creds, report_files, week_label=week_label)
+            for item in links:
+                logger.info("  %s: %s", item["name"], item["link"])
+
+        if config.NOTION_TOKEN and not skip_notion:
+            try:
+                upload_to_notion(
+                    notion_token=config.NOTION_TOKEN,
+                    df=weekly_df,
+                    result=analytics,
+                    week_label=week_label,
+                    force=force,
+                    parent_page_id=config.NOTION_PARENT_PAGE_ID,
+                )
+            except Exception:
+                logger.exception("Notion upload failed for %s (non-fatal)", week_label)
+
+    save_state({
+        "last_run_utc": datetime.now(timezone.utc).isoformat(),
+        "mode": "all_weeks",
+        "weeks_processed": len(weeks),
+    })
+    logger.info("=== Backfill complete: %d weeks ===", len(weeks))
+
+
 def main() -> None:
     setup_logging()
     args = parse_args()
 
     try:
-        run(
-            days=args.days,
-            skip_upload=args.skip_upload,
-            incremental=args.incremental,
-            force=args.force,
-            start_date=args.start,
-            end_date=args.end,
-            last_week=args.last_week,
-            skip_notion=args.skip_notion,
-        )
+        if args.all_weeks:
+            run_all_weeks(
+                start_str=args.start,
+                force=args.force,
+                skip_upload=args.skip_upload,
+                skip_notion=args.skip_notion,
+            )
+        else:
+            run(
+                days=args.days,
+                skip_upload=args.skip_upload,
+                incremental=args.incremental,
+                force=args.force,
+                start_date=args.start,
+                end_date=args.end,
+                last_week=args.last_week,
+                skip_notion=args.skip_notion,
+            )
     except FileNotFoundError as e:
         logger.error(str(e))
         sys.exit(1)
