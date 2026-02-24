@@ -33,11 +33,12 @@ jobs:
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           NOTION_PARENT_PAGE_ID: ${{ secrets.NOTION_PARENT_PAGE_ID }}
-        run: python -m time_analytics.main --last-week
+        run: python -m time_analytics.main --last-week --force
 
       - name: Upload reports as artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: time-analytics-reports
-          path: reports/
+          name: time-analytics-reports-${{ github.run_id }}
+          path: reports/**
           retention-days: 30
