@@ -11,8 +11,8 @@ time_analytics/
 ├── processing.py            # Clean events: remove all-day/zero-duration, tz convert, duration
 ├── feature_engineering.py   # Category from calendar name/[Tag], streaks, daily ratios
 ├── analytics.py             # Metrics: totals, consistency, focus (HHI), trend analysis
-├── reporting.py             # Excel (3 sheets) + 3 Plotly charts (HTML+PNG) → reports/
-├── drive_uploader.py        # Upload to Google Drive (Year-Month subfolders)
+├── reporting.py             # Excel (3 sheets) + 3 Plotly charts (HTML+PNG) → reports/YYYY-MM/WNN/
+├── drive_uploader.py        # Upload to Google Drive (Year-Month/Year-Week subfolders)
 ├── notion_uploader.py       # Upload structured data to Notion (Weekly Summary + Event Log DBs)
 ├── main.py                  # CLI orchestrator with idempotency + incremental support
 └── __main__.py              # Entry: python -m time_analytics
@@ -34,6 +34,7 @@ python -m time_analytics.main --last-week --skip-notion                   # skip
 - **Timezone:** Always use `Europe/Berlin` (configured in `config.py`)
 - **Categories:** Primary source is **calendar name** (fetches all user calendars). `[Tag]` prefix in event title overrides calendar name. Fallback: "Uncategorized".
 - **Report naming:** `weekly_report_YYYY_WNN.xlsx`, `monthly_report_YYYY_MM.{html,png}`
+- **Report location:** `reports/YYYY-MM/WNN/` (e.g. `reports/2026-02/W08/`). Idempotency check uses glob to search recursively.
 - **Logging:** Every module uses `logging.getLogger(__name__)`. Log at INFO level for pipeline steps, WARNING for skipped data, ERROR for failures.
 - **No hardcoded credentials.** Credentials come from `credentials.json` / `token.json` (gitignored) or GitHub Secrets in CI.
 
@@ -65,17 +66,32 @@ Each Details-style sheet has:
 - Upsert strategy: skip if exists (unless `--force`), bulk-replace Event Log rows by week
 - Rate-limited: 0.35s sleep between Event Log inserts
 
+## Local Report Structure
+```
+reports/
+└── YYYY-MM/              (e.g. 2026-02)
+    └── WNN/              (e.g. W08)
+        ├── weekly_report_YYYY_WNN.xlsx
+        ├── monthly_report_YYYY_MM.html
+        ├── monthly_report_YYYY_MM.png
+        ├── weekly_trend_YYYY_WNN.html
+        ├── weekly_trend_YYYY_WNN.png
+        ├── category_distribution_YYYY_WNN.html
+        └── category_distribution_YYYY_WNN.png
+```
+
 ## Drive Upload Structure
 ```
 Time Analytics Reports/
-└── YYYY-MM/              (auto-created per month)
-    ├── weekly_report_YYYY_WNN.xlsx
-    ├── monthly_report_YYYY_MM.html
-    ├── monthly_report_YYYY_MM.png
-    ├── weekly_trend_YYYY_WNN.html
-    ├── weekly_trend_YYYY_WNN.png
-    ├── category_distribution_YYYY_WNN.html
-    └── category_distribution_YYYY_WNN.png
+└── YYYY-MM/              (auto-created per month, e.g. 2026-02)
+    └── YYYY-WNN/         (auto-created per week, e.g. 2026-W08)
+        ├── weekly_report_YYYY_WNN.xlsx
+        ├── monthly_report_YYYY_MM.html
+        ├── monthly_report_YYYY_MM.png
+        ├── weekly_trend_YYYY_WNN.html
+        ├── weekly_trend_YYYY_WNN.png
+        ├── category_distribution_YYYY_WNN.html
+        └── category_distribution_YYYY_WNN.png
 ```
 
 ## Key Design Decisions
@@ -83,7 +99,7 @@ Time Analytics Reports/
 - **Category priority:** `[Tag]` in title > calendar name > "Uncategorized"
 - **Last-week mode:** `--last-week` fetches full month-to-date, splits into weekly (last Mon-Sun) and monthly (cumulative) data. Used by CI.
 - **Date range:** Also supports `--days N` (rolling) and `--start/--end` (explicit range)
-- **Idempotency:** `main.py` checks if `weekly_report_{week}.xlsx` exists before running. Use `--force` to override.
+- **Idempotency:** `main.py` globs `reports/**/weekly_report_{week}.xlsx` recursively before running. Use `--force` to override.
 - **Incremental fetch:** Uses `updatedMin` parameter from saved state in `data/pipeline_state.json`
 - **Raw data traceability:** Every fetch saves raw API response to `data/raw_events_{timestamp}.json`
 - **State persistence:** Pipeline state (last run time, counts) saved to `data/pipeline_state.json`
@@ -95,4 +111,5 @@ numpy, pandas, openpyxl, matplotlib, plotly, kaleido==0.2.1, google-api-python-c
 ## CI/CD
 - `.github/workflows/scheduled_run.yml` — runs every Monday 08:00 Berlin time with `--last-week`
 - Secrets needed: `GOOGLE_CREDENTIALS_JSON`, `GOOGLE_TOKEN_JSON`, `NOTION_TOKEN`, `NOTION_PARENT_PAGE_ID`
-- Reports uploaded as GitHub Actions artifacts (30-day retention)
+- Reports uploaded as GitHub Actions artifacts (30-day retention, named `time-analytics-reports-{run_id}`)
+- CI always uses `--force` to guarantee report generation on a clean runner
